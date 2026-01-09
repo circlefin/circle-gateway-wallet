@@ -14,11 +14,8 @@ jobs:
 
       - name: Install Node
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
         with:
-          version: 10.24.0
+            cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install
