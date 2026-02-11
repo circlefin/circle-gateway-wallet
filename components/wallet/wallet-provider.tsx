@@ -18,29 +18,27 @@
 
 "use client";
 
+import { useState } from "react";
 import { WagmiProvider } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { wagmiConfig } from "@/lib/wagmi/config";
 
-let queryClient: QueryClient | null = null;
-function getQueryClient() {
-  if (!queryClient) {
-    queryClient = new QueryClient({
-      defaultOptions: {
-        queries: {
-          staleTime: 30_000,
-          refetchOnWindowFocus: false,
-        },
-      },
-    });
-  }
-  return queryClient;
-}
-
 export function WalletProvider({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30_000,
+            refetchOnWindowFocus: false,
+          },
+        },
+      }),
+  );
+
   return (
     <WagmiProvider config={wagmiConfig}>
-      <QueryClientProvider client={getQueryClient()}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     </WagmiProvider>
   );
 }
