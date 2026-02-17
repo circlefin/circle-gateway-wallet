@@ -131,10 +131,12 @@ ADMIN_EMAIL=admin@admin.com
 
 ### Admin Account
 
-On first startup, an admin user is automatically created with the following credentials:
+On first startup, an admin user is automatically created using the credentials
+defined in your `.env.local` file:
 
-- **Email:** `admin@admin.com`
-- **Password:** `123456`
+- **Email:** The value of `ADMIN_EMAIL` (defaults to `admin@admin.com`)
+- **Password:** The value of `ADMIN_PASSWORD` (**required** — the app will not
+  create the admin account if this is not set)
 
 The admin account has access to the **Admin Dashboard**, which provides an overview of all users, wallets, and transactions in the system.
 
