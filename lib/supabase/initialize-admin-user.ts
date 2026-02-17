@@ -45,8 +45,15 @@ const createAdminUserIfNotExists = async () => {
     return;
   }
 
-  const adminEmail = "admin@admin.com";
-  const adminPassword = "123456";
+  const adminEmail = process.env.ADMIN_EMAIL ?? "admin@admin.com";
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminPassword) {
+    console.error(
+      "❌ ADMIN_PASSWORD environment variable is not set. Skipping admin user creation."
+    );
+    return;
+  }
 
   // We call our custom database function via RPC (Remote Procedure Call).
   // This is a single, fast, and scalable database query.
