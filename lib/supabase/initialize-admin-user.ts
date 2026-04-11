@@ -45,9 +45,12 @@ const createAdminUserIfNotExists = async () => {
     return;
   }
 
-  const adminEmail = "admin@admin.com";
-  const adminPassword = "123456";
-
+  const adminEmail = process.env.ADMIN_EMAIL ?? "admin@admin.com";
+  const adminPassword = process.env.INITIAL_ADMIN_PASSWORD;
+  if (!adminPassword) {
+    console.warn("INITIAL_ADMIN_PASSWORD not set, skipping admin user creation.");
+    return;
+  }
   // We call our custom database function via RPC (Remote Procedure Call).
   // This is a single, fast, and scalable database query.
   const { data: adminUserExists, error: rpcError } = await adminAuthClient.rpc(
