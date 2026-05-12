@@ -7,7 +7,8 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --import tsx --test app/api/openzepellin/webhook/route.test.ts"
   },
   "dependencies": {
     "@circle-fin/developer-controlled-wallets": "^10.0.1",
@@ -50,6 +51,7 @@
     "postcss": "^8",
     "tailwindcss": "^4.1.13",
     "tailwindcss-animate": "^1.0.7",
+    "tsx": "^4.19.4",
     "typescript": "^5"
   }
 }
