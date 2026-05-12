@@ -73,7 +73,7 @@ Integrate USDC as a payment method for purchasing credits on Arc. This sample ap
    npm run dev
    ```
 
-   The app will be available at `http://localhost:3000`. The admin wallet is automatically created on first startup.
+   The app will be available at `http://localhost:3000`. The admin user will be created on first startup if `INITIAL_ADMIN_PASSWORD` is set in your `.env.local`.
 
 5. Set up Circle Webhooks (for local development):
 
@@ -114,6 +114,7 @@ CIRCLE_USDC_TOKEN_ID=
 
 # Misc
 ADMIN_EMAIL=admin@admin.com
+INITIAL_ADMIN_PASSWORD=
 ```
 
 | Variable                              | Scope       | Purpose                                                                  |
@@ -126,15 +127,18 @@ ADMIN_EMAIL=admin@admin.com
 | `CIRCLE_BLOCKCHAIN`                   | Server-side | Blockchain network identifier (e.g., "ARC-TESTNET").                     |
 | `CIRCLE_USDC_TOKEN_ID`                | Server-side | USDC token ID for the specified blockchain. Pre-filled for ARC-TESTNET.  |
 | `ADMIN_EMAIL`                         | Server-side | Admin user email address.                                                |
+| `INITIAL_ADMIN_PASSWORD`              | Server-side | Password for the admin user. Admin account is only created when this is set. |
 
 ## User Accounts
 
 ### Admin Account
 
-On first startup, an admin user is automatically created with the following credentials:
+On first startup, an admin user is created using the credentials from your `.env.local`:
 
-- **Email:** `admin@admin.com`
-- **Password:** `123456`
+- **Email:** value of `ADMIN_EMAIL` (defaults to `admin@admin.com`)
+- **Password:** value of `INITIAL_ADMIN_PASSWORD`
+
+The admin account is only created if `INITIAL_ADMIN_PASSWORD` is set. Make sure to add it to your `.env.local` before starting the server for the first time.
 
 The admin account has access to the **Admin Dashboard**, which provides an overview of all users, wallets, and transactions in the system.
 
