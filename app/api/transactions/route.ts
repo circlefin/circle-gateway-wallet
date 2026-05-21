@@ -130,6 +130,7 @@ export async function POST(req: NextRequest) {
           .from("transactions")
           .select("*")
           .eq("idempotency_key", idempotencyKey)
+          .eq("user_id", user.id)
           .single();
 
         if (existingTx) {

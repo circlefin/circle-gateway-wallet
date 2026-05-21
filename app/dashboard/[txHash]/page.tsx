@@ -70,11 +70,11 @@ export default async function TransactionDetailsPage(
     redirect("/auth/login");
   }
 
-  // Fetch the real transaction by tx_hash
   const { data: transaction, error: txError } = await supabase
     .from("transactions")
     .select("*")
     .eq("tx_hash", txHash)
+    .eq("user_id", data.user.id)
     .single();
 
   if (txError || !transaction) {
