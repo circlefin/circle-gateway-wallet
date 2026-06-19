@@ -147,9 +147,33 @@ async function updateTransactionStatus(notification: CircleNotification) {
     const isSuccessfulUpdate = (mappedStatus === 'confirmed' || mappedStatus === 'complete');
     const wasAlreadyProcessed = (currentStatus === 'confirmed' || currentStatus === 'complete');
 
-    // Only increment credits if the transaction is moving to a success state
-    // for the first time. This prevents double-crediting.
     if (isSuccessfulUpdate && !wasAlreadyProcessed) {
+      // Atomic update: the WHERE status='pending' condition ensures only one concurrent
+      // caller can transition this transaction. If the PATCH handler processed it first,
+      // maybeSingle() returns null and we skip crediting.
+      const { data: atomicResult, error: atomicError } = await supabaseAdminClient
+        .from("transactions")
+        .update({
+          status: mappedStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", transaction.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+
+      if (atomicError) {
+        console.error(`Failed updating transaction status for ${transaction.id}:`, atomicError);
+        continue;
+      }
+
+      if (!atomicResult) {
+        // Another path (e.g. PATCH handler) already transitioned this transaction
+        console.log(`Transaction ${transaction.id} already processed by another path, skipping credit`);
+        continue;
+      }
+
+      // This path won the atomic race — safe to increment credits
       console.log(`Transaction ${transaction.id} confirmed. Crediting user ${transaction.user_id} with ${transaction.credit_amount} credits.`);
 
       const { error: creditsError } = await supabaseAdminClient.rpc("increment_credits", {
@@ -158,26 +182,27 @@ async function updateTransactionStatus(notification: CircleNotification) {
       });
 
       if (creditsError) {
-        // Log the error but continue, so we at least update the transaction status.
         console.error(`CRITICAL: Failed to increment credits for user ${transaction.user_id} on transaction ${transaction.id}. Error:`, creditsError);
       } else {
         console.log(`Successfully credited user ${transaction.user_id}.`);
       }
-    }
 
-    // Update the transaction status regardless of the credit operation.
-    const { error: updateError } = await supabaseAdminClient
-      .from("transactions")
-      .update({
-        status: mappedStatus,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", transaction.id);
-
-    if (updateError) {
-      console.error(`Failed updating transaction status for ${transaction.id}:`, updateError);
-    } else {
       console.log(`Updated transaction ${transaction.id} status from '${currentStatus}' to '${mappedStatus}'`);
+    } else {
+      // Non-credit status update (e.g. confirmed→complete, any→failed): no race risk
+      const { error: updateError } = await supabaseAdminClient
+        .from("transactions")
+        .update({
+          status: mappedStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", transaction.id);
+
+      if (updateError) {
+        console.error(`Failed updating transaction status for ${transaction.id}:`, updateError);
+      } else {
+        console.log(`Updated transaction ${transaction.id} status from '${currentStatus}' to '${mappedStatus}'`);
+      }
     }
   }
 }

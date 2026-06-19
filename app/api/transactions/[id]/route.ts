@@ -204,8 +204,7 @@ export async function PATCH(
       );
     }
 
-    // Only update if currently in 'pending' status
-    // Don't override Circle's authoritative updates
+    // Fast path: if already past pending, no work needed (not a race guard — see atomic update below)
     if (transaction.status !== "pending") {
       return NextResponse.json(
         {
@@ -231,7 +230,47 @@ export async function PATCH(
       },
     };
 
-    // Increment user credits if this is a credit transaction
+    // Atomic update: the WHERE status='pending' condition ensures only one concurrent
+    // caller can transition this transaction. If the Circle webhook processed it first,
+    // maybeSingle() returns null and we skip crediting.
+    const { data: updatedTransaction, error: updateError } =
+      await supabaseAdminClient
+        .from("transactions")
+        .update({
+          status: "complete",
+          metadata,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id)
+        .eq("status", "pending")
+        .select()
+        .maybeSingle();
+
+    if (updateError) {
+      console.error("[transactions/PATCH] Update error:", updateError);
+      return NextResponse.json(
+        { error: "Update failed", details: updateError.message },
+        { status: 500 }
+      );
+    }
+
+    if (!updatedTransaction) {
+      // Another path (e.g. Circle webhook) already transitioned this transaction
+      return NextResponse.json(
+        {
+          ok: true,
+          message: "Transaction already processed by another path, no update needed",
+          transaction: {
+            id: transaction.id,
+            status: transaction.status,
+            updatedAt: transaction.updated_at,
+          },
+        },
+        { status: 200 }
+      );
+    }
+
+    // This path won the atomic race — safe to increment credits
     if (transaction.direction === "credit" && transaction.credit_amount && transaction.user_id) {
       console.log(`Transaction ${transaction.id} completed. Crediting user ${transaction.user_id} with ${transaction.credit_amount} credits.`);
 
@@ -242,31 +281,9 @@ export async function PATCH(
 
       if (creditsError) {
         console.error(`CRITICAL: Failed to increment credits for user ${transaction.user_id} on transaction ${transaction.id}. Error:`, creditsError);
-        // Continue with status update even if credits fail - we can fix this manually
       } else {
         console.log(`Successfully credited user ${transaction.user_id}.`);
       }
-    }
-
-    // Update transaction to 'complete' status
-    const { data: updatedTransaction, error: updateError } =
-      await supabaseAdminClient
-        .from("transactions")
-        .update({
-          status: "complete",
-          metadata,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", id)
-        .select()
-        .single();
-
-    if (updateError) {
-      console.error("[transactions/PATCH] Update error:", updateError);
-      return NextResponse.json(
-        { error: "Update failed", details: updateError.message },
-        { status: 500 }
-      );
     }
 
     return NextResponse.json(
