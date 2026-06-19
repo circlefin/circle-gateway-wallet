@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdminClient } from "@/lib/supabase/admin-client";
+import { checkSignature } from "./verify-signature";
 
 // This interface is a simplified version of the relayer's payload.
 interface RelayerNotificationPayload {
@@ -28,9 +29,15 @@ interface RelayerNotificationPayload {
 
 export async function POST(req: NextRequest) {
   try {
-    // In production, you would verify the signature from the relayer
-    // using the WEBHOOK_SIGNING_KEY you configured.
-    const body = await req.json();
+    const rawBody = Buffer.from(await req.arrayBuffer());
+    const sigHeader = req.headers.get("x-signature") ?? "";
+    const signingKey = process.env.WEBHOOK_SIGNING_KEY ?? "";
+
+    if (!checkSignature(rawBody, signingKey, sigHeader)) {
+      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+    }
+
+    const body = JSON.parse(rawBody.toString("utf8"));
     const notification = body.payload as RelayerNotificationPayload;
 
     console.log("Received notification from OpenZeppelin Relayer:", notification);
