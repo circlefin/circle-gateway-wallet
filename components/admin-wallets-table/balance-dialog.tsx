@@ -56,7 +56,7 @@ export function BalanceDialog({ wallet, onClose }: BalanceDialogProps) {
     if (wallet) {
       setIsLoading(true);
       setError(null);
-      getWalletBalance(wallet.circle_wallet_id).then((result) => {
+      getWalletBalance(wallet.address, wallet.chain ?? "").then((result) => {
         if (result.error) {
           setError(result.error);
         } else {

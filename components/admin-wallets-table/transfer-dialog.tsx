@@ -138,10 +138,7 @@ export function TransferDialog({
         toast.error("Transfer Failed", { description: result.error });
       } else {
         toast.success("Transfer Submitted Successfully", {
-          description: `Transaction ID: ${result.transactionId?.slice(
-            0,
-            15
-          )}...`,
+          description: `Tx: ${result.txHash?.slice(0, 15)}...`,
         });
         onClose();
       }

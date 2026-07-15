@@ -19,18 +19,21 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { createPublicClient, http, erc20Abi } from "viem";
 import { Database } from "@/types/supabase";
-import { circleDeveloperSdk } from "@/lib/circle/developer-controlled-wallets-client";
-import { convertToSmallestUnit } from "@/lib/utils/convert-to-smallest-unit";
 import { supabaseAdminClient } from "@/lib/supabase/admin-client";
-import { CHAIN_IDS_TO_TOKEN_MESSENGER, CHAIN_IDS_TO_USDC_ADDRESSES, SupportedChainId } from "@/lib/chains";
+import { Blockchain, BridgeChain } from "@circle-fin/app-kit";
+import { getAppKit, createAdapter } from "@/lib/circle/app-kit-client";
+import {
+  SupportedChainId,
+  CHAIN_IDS_TO_USDC_ADDRESSES,
+  CHAIN_DB_TO_BRIDGE_CHAIN,
+  CHAIN_DB_TO_RPC,
+} from "@/lib/chains";
 
 const baseUrl = process.env.NEXT_PUBLIC_VERCEL_URL
   ? `https://${process.env.NEXT_PUBLIC_VERCEL_URL}`
   : "http://localhost:3000";
-
-const circleApiKey = process.env.CIRCLE_API_KEY;
-const circleApiBaseUrl = "https://api.circle.com";
 
 type WalletStatus = Database["public"]["Enums"]["admin_wallet_status"];
 
@@ -44,35 +47,16 @@ export interface TokenBalance {
   amount: string;
 }
 
-interface AxiosErrorLike {
-  isAxiosError: true;
-  response?: {
-    data?: {
-      message?: string;
-    };
-  };
-}
-
-function isAxiosError(error: unknown): error is AxiosErrorLike {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as AxiosErrorLike).isAxiosError === true
-  );
-}
-
 /**
  * Creates a new Circle wallet via internal API routes and saves it to the database.
  */
 export async function createAdminWallet(formData: FormData) {
   const label = formData.get("label") as string;
-  // Get the blockchain from the form data.
   const blockchain = formData.get("blockchain") as string;
 
   if (!label || label.trim().length < 3) {
     return { error: "Label must be at least 3 characters long." };
   }
-  // Add a check for the blockchain
   if (!blockchain) {
     return { error: "Blockchain is a required field." };
   }
@@ -87,13 +71,9 @@ export async function createAdminWallet(formData: FormData) {
       throw new Error("Failed to create wallet set.");
     const createdWalletSet = await createdWalletSetResponse.json();
 
-    // Pass the selected blockchain to the /api/wallet endpoint.
     const createdWalletResponse = await fetch(`${baseUrl}/api/wallet`, {
       method: "POST",
-      body: JSON.stringify({
-        walletSetId: createdWalletSet.id,
-        blockchain,
-      }),
+      body: JSON.stringify({ walletSetId: createdWalletSet.id, blockchain }),
       headers: { "Content-Type": "application/json" },
     });
     if (!createdWalletResponse.ok) throw new Error("Failed to create wallet.");
@@ -140,8 +120,58 @@ export async function updateAdminWalletStatus(
   } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : "An unexpected error occurred.";
+    console.error(`Error updating wallet ${id} to status ${status}:`, message);
+    return { error: message };
+  }
+}
+
+/**
+ * Fetches the USDC balance for an admin wallet by reading directly from the chain.
+ */
+export async function getWalletBalance(
+  walletAddress: string,
+  chainDbString: string
+): Promise<{ balances?: TokenBalance[]; error?: string }> {
+  try {
+    const chainKey = chainDbString.replace(/-/g, "_");
+    const chainId =
+      SupportedChainId[chainKey as keyof typeof SupportedChainId];
+    const usdcAddress = CHAIN_IDS_TO_USDC_ADDRESSES[chainId];
+    const rpcUrl = CHAIN_DB_TO_RPC[chainDbString];
+
+    if (!usdcAddress || !rpcUrl) {
+      return { error: `Unsupported chain: ${chainDbString}` };
+    }
+
+    const client = createPublicClient({ transport: http(rpcUrl) });
+    const rawBalance = await client.readContract({
+      address: usdcAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [walletAddress as `0x${string}`],
+    });
+
+    const decimals = 6;
+    const amount = (Number(rawBalance) / 10 ** decimals).toString();
+
+    return {
+      balances: [
+        {
+          token: {
+            blockchain: chainDbString,
+            name: "USD Coin",
+            symbol: "USDC",
+            decimals,
+          },
+          amount,
+        },
+      ],
+    };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "An unexpected error occurred.";
     console.error(
-      `Error updating wallet ${id} to status ${status}:`,
+      `Error fetching on-chain balance for ${walletAddress}:`,
       message
     );
     return { error: message };
@@ -149,49 +179,8 @@ export async function updateAdminWalletStatus(
 }
 
 /**
- * Fetches the token balances for a specific Circle wallet using a direct API call.
- */
-export async function getWalletBalance(
-  walletId: string
-): Promise<{ balances?: TokenBalance[]; error?: string }> {
-  if (!circleApiKey) {
-    const message = "Circle API Key is not configured on the server.";
-    console.error(message);
-    return { error: message };
-  }
-
-  try {
-    const url = `${circleApiBaseUrl}/v1/w3s/wallets/${walletId}/balances?includeAll=true`;
-    const options = {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${circleApiKey}`,
-      },
-    };
-
-    const response = await fetch(url, options);
-    const responseBody = await response.json();
-
-    if (!response.ok) {
-      throw new Error(
-        responseBody.message || "Failed to fetch balances from Circle API."
-      );
-    }
-
-    const balances = responseBody.data.tokenBalances as TokenBalance[] | undefined;
-
-    return { balances: balances ?? [] };
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error ? error.message : "An unexpected error occurred.";
-    console.error(`Error fetching balance for wallet ${walletId}:`, message);
-    return { error: message };
-  }
-}
-
-/**
- * Initiates a transfer from a developer-controlled admin wallet and logs the transaction.
+ * Transfers USDC from an admin wallet to a destination address on the same chain
+ * using App Kit Send.
  */
 export async function transferFromAdminWallet(
   sourceCircleWalletId: string,
@@ -199,7 +188,6 @@ export async function transferFromAdminWallet(
   amount: string
 ) {
   try {
-    // Fetch the source wallet's internal DB ID, chain, and address from our database.
     const { data: sourceWallet, error: fetchError } = await supabaseAdminClient
       .from("admin_wallets")
       .select("id, chain, address")
@@ -210,62 +198,41 @@ export async function transferFromAdminWallet(
       throw new Error("Source wallet not found in the database.");
     }
 
-    // 1. Convert the chain string (e.g., "ETH-SEPOLIA") to its corresponding enum key.
-    const sourceChainKey = sourceWallet.chain.replace(/-/g, '_');
-    const sourceChainId = SupportedChainId[sourceChainKey as keyof typeof SupportedChainId];
-
-    if (sourceChainId === undefined) {
-      throw new Error(`Unsupported source chain for transfer: ${sourceWallet.chain}`);
+    const bridgeChain = CHAIN_DB_TO_BRIDGE_CHAIN[sourceWallet.chain ?? ""];
+    if (!bridgeChain) {
+      throw new Error(
+        `Unsupported source chain for transfer: ${sourceWallet.chain}`
+      );
     }
 
-    // 2. Look up the correct USDC contract address for the source chain.
-    const usdcContractAddress = CHAIN_IDS_TO_USDC_ADDRESSES[sourceChainId];
+    const kit = getAppKit();
+    const adapter = createAdapter();
 
-    if (!usdcContractAddress) {
-      throw new Error(`Could not find a USDC contract address for chain: ${sourceWallet.chain}`);
-    }
-
-    // 3. Use the robust `createContractExecutionTransaction` to call the `transfer` function.
-    const response = await circleDeveloperSdk.createContractExecutionTransaction({
-      walletId: sourceCircleWalletId,
-      contractAddress: usdcContractAddress, // The USDC contract on the source chain
-      abiFunctionSignature: "transfer(address,uint256)",
-      abiParameters: [
-        destinationAddress,
-        convertToSmallestUnit(amount).toString(),
-      ],
-      fee: {
-        type: "level",
-        config: {
-          feeLevel: "HIGH",
-        },
+    const result = await kit.send({
+      from: {
+        adapter,
+        chain: bridgeChain as Blockchain,
+        address: sourceWallet.address,
       },
+      to: destinationAddress,
+      amount,
+      token: "USDC",
     });
 
-    const transactionData = response.data;
-
-    if (!transactionData?.id) {
-      throw new Error("Failed to initiate transfer with Circle API.");
-    }
-
-    // Convert chain name to numeric chain ID
-    const chainKey = (sourceWallet.chain || "").replace(/-/g, '_');
-    const chainId = SupportedChainId[chainKey as keyof typeof SupportedChainId];
-
-    // Log the new transaction to the unified `transactions` table.
     const { error: insertError } = await supabaseAdminClient
       .from("transactions")
       .insert({
         transaction_type: "ADMIN",
-        circle_transaction_id: transactionData.id,
+        circle_transaction_id: result.txHash,
+        tx_hash: result.txHash,
         source_wallet_id: sourceWallet.id,
         destination_address: destinationAddress,
         amount_usdc: Number(amount),
         asset: "USDC",
-        chain: chainId ? String(chainId) : sourceWallet.chain || "UNKNOWN",
-        wallet_id: sourceWallet.address, // Source wallet address, not destination
-        idempotency_key: `admin:${transactionData.id}`,
-        status: "pending"
+        chain: sourceWallet.chain ?? "UNKNOWN",
+        wallet_id: sourceWallet.address,
+        idempotency_key: `admin:${result.txHash}`,
+        status: "complete",
       });
 
     if (insertError) {
@@ -276,17 +243,10 @@ export async function transferFromAdminWallet(
     }
 
     revalidatePath("/dashboard");
-    return { success: true, transactionId: transactionData.id };
+    return { success: true, txHash: result.txHash };
   } catch (error: unknown) {
-    let message = "An unexpected error occurred.";
-
-    if (isAxiosError(error)) {
-      message =
-        error.response?.data?.message || "An unknown Circle API error occurred.";
-    } else if (error instanceof Error) {
-      message = error.message;
-    }
-
+    const message =
+      error instanceof Error ? error.message : "An unexpected error occurred.";
     console.error(
       `Error transferring from wallet ${sourceCircleWalletId}:`,
       message
@@ -295,18 +255,16 @@ export async function transferFromAdminWallet(
   }
 }
 
+/**
+ * Bridges USDC from an admin wallet to a destination address on a different chain
+ * using App Kit Bridge (CCTPv2 Fast). Blocks until the full bridge is complete.
+ */
 export async function transferFromAdminWalletCCTP(
   sourceCircleWalletId: string,
   destinationAddress: string,
   amount: string
 ) {
-
-  console.log("[CCTP] Approving USDC transfer from source wallet...");
-
-  const formattedAmount = convertToSmallestUnit(amount);
-
   try {
-    // Fetch the source wallet's internal DB ID, chain, and address from our database.
     const { data: sourceWallet, error: fetchError } = await supabaseAdminClient
       .from("admin_wallets")
       .select("id, chain, address")
@@ -317,65 +275,74 @@ export async function transferFromAdminWalletCCTP(
       throw new Error("Source wallet not found in the database.");
     }
 
-    // Convert the dash-separated chain string from the DB to the underscore-separated enum key format.
-    const chainKey = sourceWallet.chain.replace(/-/g, '_');
+    const { data: destinationWallet, error: destFetchError } =
+      await supabaseAdminClient
+        .from("admin_wallets")
+        .select("chain")
+        .eq("address", destinationAddress)
+        .single();
 
-    // Get the numerical chain ID from the string stored in the database.
-    const sourceChainId = SupportedChainId[chainKey as keyof typeof SupportedChainId];
-
-    if (sourceChainId === undefined) {
-      throw new Error(`Unsupported source chain: ${sourceWallet.chain}. Please check the configuration.`);
+    if (destFetchError || !destinationWallet?.chain) {
+      throw new Error(
+        `Could not resolve destination chain for address: ${destinationAddress}`
+      );
     }
 
-    // Look up the correct contract addresses using the chain ID.
-    const tokenMessengerAddress = CHAIN_IDS_TO_TOKEN_MESSENGER[sourceChainId];
-    const usdcContractAddress = CHAIN_IDS_TO_USDC_ADDRESSES[sourceChainId];
+    const sourceChain = CHAIN_DB_TO_BRIDGE_CHAIN[sourceWallet.chain ?? ""];
+    const destinationChain =
+      CHAIN_DB_TO_BRIDGE_CHAIN[destinationWallet.chain];
 
-    if (!tokenMessengerAddress || !usdcContractAddress) {
-      throw new Error(`Contract addresses for chain ID ${sourceChainId} are not defined.`);
+    if (!sourceChain) {
+      throw new Error(
+        `Unsupported source chain: ${sourceWallet.chain}`
+      );
+    }
+    if (!destinationChain) {
+      throw new Error(
+        `Unsupported destination chain: ${destinationWallet.chain}`
+      );
     }
 
-    const approvalResponse = await circleDeveloperSdk.createContractExecutionTransaction({
-      walletId: sourceCircleWalletId,
-      abiFunctionSignature: "approve(address,uint256)",
-      abiParameters: [
-        // Use the dynamically looked-up Token Messenger address
-        tokenMessengerAddress,
-        formattedAmount.toString()
-      ],
-      // Use the dynamically looked-up USDC contract address
-      contractAddress: usdcContractAddress,
-      fee: {
-        type: "level",
-        config: {
-          feeLevel: "MEDIUM",
-        },
+    const kit = getAppKit();
+    const adapter = createAdapter();
+
+    const result = await kit.bridge({
+      from: {
+        adapter,
+        chain: sourceChain as BridgeChain,
+        address: sourceWallet.address,
       },
+      to: {
+        adapter,
+        chain: destinationChain as BridgeChain,
+        address: destinationAddress,
+      },
+      amount,
+      token: "USDC",
+      config: { transferSpeed: "FAST" },
     });
 
-    if (!approvalResponse.data?.id) {
-      throw new Error("Failed to initiate CCTP transfer with Circle API.");
-    }
+    const txHash =
+      result.steps?.at(-1)?.txHash ?? result.steps?.[0]?.txHash ?? sourceCircleWalletId;
+    const status = result.state === "success" ? "complete" : "pending";
 
-    // Log the new transaction to the unified `transactions` table.
     const { error: insertError } = await supabaseAdminClient
       .from("transactions")
       .insert({
-        transaction_type: "CCTP_APPROVAL",
-        circle_transaction_id: approvalResponse.data.id,
-        source_wallet_id: sourceWallet.id, // Use the internal DB ID
+        transaction_type: "ADMIN",
+        circle_transaction_id: txHash,
+        tx_hash: txHash,
+        source_wallet_id: sourceWallet.id,
         destination_address: destinationAddress,
         amount_usdc: Number(amount),
         asset: "USDC",
-        chain: String(sourceChainId), // Use numeric chain ID
-        wallet_id: sourceWallet.address, // Source wallet address, not destination
-        idempotency_key: `admin:${approvalResponse.data.id}`,
-        status: "pending"
+        chain: sourceWallet.chain ?? "UNKNOWN",
+        wallet_id: sourceWallet.address,
+        idempotency_key: `admin:${txHash}`,
+        status,
       });
 
     if (insertError) {
-      // Log this as a critical error but don't fail the entire operation,
-      // as the on-chain transaction has already been submitted.
       console.error(
         "CRITICAL: Failed to log transaction to database:",
         insertError.message
@@ -383,19 +350,12 @@ export async function transferFromAdminWalletCCTP(
     }
 
     revalidatePath("/dashboard");
-    return { transactionId: approvalResponse.data.id }
-  } catch (error) {
-    let message = "An unexpected error occurred.";
-
-    if (isAxiosError(error)) {
-      message =
-        error.response?.data?.message || "An unknown Circle API error occurred.";
-    } else if (error instanceof Error) {
-      message = error.message;
-    }
-
+    return { success: true, txHash };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "An unexpected error occurred.";
     console.error(
-      `Error transferring from wallet ${sourceCircleWalletId}:`,
+      `Error bridging from wallet ${sourceCircleWalletId}:`,
       message
     );
     return { error: message };
@@ -404,7 +364,6 @@ export async function transferFromAdminWalletCCTP(
 
 /**
  * Fetches all admin wallet addresses for filtering realtime subscriptions.
- * Uses admin client to bypass RLS restrictions.
  */
 export async function getAdminWalletAddresses(): Promise<string[]> {
   try {
@@ -413,13 +372,19 @@ export async function getAdminWalletAddresses(): Promise<string[]> {
       .select("address");
 
     if (error) {
-      console.error("[Server Action] Error fetching admin wallet addresses:", error);
+      console.error(
+        "[Server Action] Error fetching admin wallet addresses:",
+        error
+      );
       return [];
     }
 
-    return data?.map(w => w.address) || [];
+    return data?.map((w) => w.address) || [];
   } catch (error) {
-    console.error("[Server Action] Unexpected error fetching admin wallet addresses:", error);
+    console.error(
+      "[Server Action] Unexpected error fetching admin wallet addresses:",
+      error
+    );
     return [];
   }
 }
