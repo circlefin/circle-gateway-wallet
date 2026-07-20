@@ -48,11 +48,11 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Fetch transaction (RLS will ensure user can only see their own)
     const { data: transaction, error: txError } = await supabase
       .from("transactions")
       .select("*")
       .eq("id", id)
+      .eq("user_id", user.id)
       .single();
 
     if (txError) {

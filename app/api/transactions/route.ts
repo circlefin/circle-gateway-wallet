@@ -130,6 +130,7 @@ export async function POST(req: NextRequest) {
           .from("transactions")
           .select("*")
           .eq("idempotency_key", idempotencyKey)
+          .eq("user_id", user.id)
           .single();
 
         if (existingTx) {
@@ -218,6 +219,7 @@ export async function GET(req: NextRequest) {
       .from("transactions")
       .select("*")
       .eq("transaction_type", "USER")
+      .eq("user_id", user.id)
       .order("created_at", { ascending: false });
 
     if (txError) {
