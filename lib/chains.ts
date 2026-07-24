@@ -25,9 +25,6 @@ export enum SupportedChainId {
   ARC_TESTNET = 5042002
 }
 
-export const DEFAULT_MAX_FEE = 1000n;
-export const DEFAULT_FINALITY_THRESHOLD = 2000;
-
 export const CHAIN_TO_CHAIN_NAME: Record<number, string> = {
   [SupportedChainId.ETH_SEPOLIA]: "Ethereum Sepolia",
   [SupportedChainId.AVAX_FUJI]: "Avalanche Fuji",
@@ -35,18 +32,19 @@ export const CHAIN_TO_CHAIN_NAME: Record<number, string> = {
   [SupportedChainId.ARC_TESTNET]: "Arc Testnet"
 };
 
+export const SUPPORTED_CHAINS = [
+  SupportedChainId.ETH_SEPOLIA,
+  SupportedChainId.AVAX_FUJI,
+  SupportedChainId.BASE_SEPOLIA,
+  SupportedChainId.ARC_TESTNET
+];
+
+// USDC contract addresses per chain — used for on-chain balance reads.
 export const CHAIN_IDS_TO_USDC_ADDRESSES: Record<number, Hex> = {
   [SupportedChainId.ETH_SEPOLIA]: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
   [SupportedChainId.AVAX_FUJI]: "0x5425890298aed601595a70AB815c96711a31Bc65",
   [SupportedChainId.BASE_SEPOLIA]: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   [SupportedChainId.ARC_TESTNET]: "0x3600000000000000000000000000000000000000"
-};
-
-export const CHAIN_IDS_TO_TOKEN_MESSENGER: Record<number, Hex> = {
-  [SupportedChainId.ETH_SEPOLIA]: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-  [SupportedChainId.AVAX_FUJI]: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-  [SupportedChainId.BASE_SEPOLIA]: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa",
-  [SupportedChainId.ARC_TESTNET]: "0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa"
 };
 
 export const CHAIN_IDS_TO_USDC_TOKEN_ID: Record<number, string> = {
@@ -56,23 +54,18 @@ export const CHAIN_IDS_TO_USDC_TOKEN_ID: Record<number, string> = {
   [SupportedChainId.ARC_TESTNET]: "15dc2b5d-0994-58b0-bf8c-3a0501148ee8"
 };
 
-export const CHAIN_IDS_TO_MESSAGE_TRANSMITTER: Record<number, Hex> = {
-  [SupportedChainId.ETH_SEPOLIA]: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
-  [SupportedChainId.AVAX_FUJI]: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
-  [SupportedChainId.BASE_SEPOLIA]: "0xe737e5cebeeba77efe34d4aa090756590b1ce275",
-  [SupportedChainId.ARC_TESTNET]: "0xe737e5cebeeba77efe34d4aa090756590b1ce275"
+// Maps Circle/DB chain strings (e.g. "ARC-TESTNET") to App Kit BridgeChain identifiers.
+export const CHAIN_DB_TO_BRIDGE_CHAIN: Record<string, string> = {
+  "ARC-TESTNET": "Arc_Testnet",
+  "ETH-SEPOLIA": "Ethereum_Sepolia",
+  "BASE-SEPOLIA": "Base_Sepolia",
+  "AVAX-FUJI": "Avalanche_Fuji",
 };
 
-export const DESTINATION_DOMAINS: Record<number, number> = {
-  [SupportedChainId.ETH_SEPOLIA]: 0,
-  [SupportedChainId.AVAX_FUJI]: 1,
-  [SupportedChainId.BASE_SEPOLIA]: 6,
-  [SupportedChainId.ARC_TESTNET]: 26
+// Public RPC endpoints used for on-chain balance reads via viem.
+export const CHAIN_DB_TO_RPC: Record<string, string> = {
+  "ARC-TESTNET": "https://rpc.testnet.arc.network/",
+  "ETH-SEPOLIA": "https://rpc.sepolia.org",
+  "BASE-SEPOLIA": "https://sepolia.base.org",
+  "AVAX-FUJI": "https://api.avax-test.network/ext/bc/C/rpc",
 };
-
-export const SUPPORTED_CHAINS = [
-  SupportedChainId.ETH_SEPOLIA,
-  SupportedChainId.AVAX_FUJI,
-  SupportedChainId.BASE_SEPOLIA,
-  SupportedChainId.ARC_TESTNET
-];
