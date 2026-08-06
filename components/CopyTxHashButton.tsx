@@ -18,18 +18,37 @@
 
 // components/CopyTxHashButton.tsx
 "use client";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Copy } from "lucide-react";
+import { Copy, Check } from "lucide-react";
 
 export function CopyTxHashButton({ txHash }: { txHash: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(txHash);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (error) {
+      console.error("Failed to copy transaction hash:", error);
+    }
+  };
+
   return (
     <Button
       variant="ghost"
       size="sm"
       className="h-6 w-6 p-0"
-      onClick={() => navigator.clipboard.writeText(txHash)}
+      onClick={handleCopy}
+      title={copied ? "Copied!" : "Copy transaction hash"}
+      aria-label={copied ? "Copied transaction hash" : "Copy transaction hash"}
     >
-      <Copy className="w-3 h-3" />
+      {copied ? (
+        <Check className="w-3 h-3 text-green-500" />
+      ) : (
+        <Copy className="w-3 h-3" />
+      )}
     </Button>
   );
 }
