@@ -31,5 +31,6 @@ namespace NodeJS {
 
     // Misc
     ADMIN_EMAIL: string
+    ADMIN_PASSWORD?: string
   }
 }
