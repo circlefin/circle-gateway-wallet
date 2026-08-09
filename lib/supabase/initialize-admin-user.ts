@@ -40,13 +40,51 @@ if (supabaseUrl && supabaseServiceRoleKey) {
   );
 }
 
+// Passwords that must never guard a privileged account, even if set explicitly.
+const COMMON_WEAK_PASSWORDS = new Set([
+  "123456",
+  "12345678",
+  "123456789",
+  "password",
+  "admin",
+  "admin123",
+  "qwerty",
+  "letmein",
+  "changeme",
+  "welcome",
+]);
+
+const isWeakPassword = (password: string): boolean =>
+  password.length < 8 || COMMON_WEAK_PASSWORDS.has(password.toLowerCase());
+
 const createAdminUserIfNotExists = async () => {
   if (!adminAuthClient) {
     return;
   }
 
-  const adminEmail = "admin@admin.com";
-  const adminPassword = "123456";
+  // Never provision the admin account with a hardcoded, publicly known
+  // password. Require the deployment to supply one explicitly via
+  // ADMIN_PASSWORD and reject obviously weak values, so an exposed instance
+  // cannot be taken over with a guessable default. ADMIN_EMAIL keeps its
+  // documented default because the database RLS policies key off that address.
+  const adminEmail = process.env.ADMIN_EMAIL ?? "admin@admin.com";
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminPassword) {
+    console.warn(
+      "ADMIN_PASSWORD is not set. Skipping admin user creation. " +
+        "Set a strong ADMIN_PASSWORD to enable automatic admin provisioning."
+    );
+    return;
+  }
+
+  if (isWeakPassword(adminPassword)) {
+    console.error(
+      "ADMIN_PASSWORD is too weak (must be at least 8 characters and not a " +
+        "well-known password). Skipping admin user creation."
+    );
+    return;
+  }
 
   // We call our custom database function via RPC (Remote Procedure Call).
   // This is a single, fast, and scalable database query.
