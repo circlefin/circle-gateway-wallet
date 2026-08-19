@@ -22,12 +22,11 @@ import { useMemo } from "react";
 import { useAccount, useChainId, useSwitchChain } from "wagmi";
 import { SUPPORTED_CHAINS } from "@/lib/wagmi/config";
 
-const MAINNET_CHAINS = SUPPORTED_CHAINS.filter(
-  (c) => !/sepolia|amoy/i.test(c.name.toLowerCase())
-);
-const TESTNET_CHAINS = SUPPORTED_CHAINS.filter((c) =>
-  /sepolia|amoy/i.test(c.name.toLowerCase())
-);
+const isTestnetChain = (c: (typeof SUPPORTED_CHAINS)[number]): boolean =>
+  Boolean((c as { testnet?: boolean }).testnet || /testnet|sepolia|amoy/i.test(c.name));
+
+const MAINNET_CHAINS = SUPPORTED_CHAINS.filter((c) => !isTestnetChain(c));
+const TESTNET_CHAINS = SUPPORTED_CHAINS.filter((c) => isTestnetChain(c));
 
 export interface NetworkStatus {
   isConnected: boolean;
