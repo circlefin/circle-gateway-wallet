@@ -42,12 +42,10 @@ export const USDC_ADDRESSES: Record<number, `0x${string}`> = {
   [optimism.id]: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
   // Testnets
   [baseSepolia.id]: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  // Optional additional testnets (placeholder or known deploys)
-  [sepolia.id]: "0xd6c3a3a6B523b3f30c1e03DF621cBe03b12E0A35",
-  [polygonAmoy.id]: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-  // Updated to official Arbitrum Sepolia USDC
+  [sepolia.id]: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+  [polygonAmoy.id]: "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
   [arbitrumSepolia.id]: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-  [optimismSepolia.id]: "0x09D1D7d6b9d4B4b0597F64E299fB2C89F76DdF24",
+  [optimismSepolia.id]: "0x5fd84259d66Cd46123540766Be93DFE6D43130D7",
   5042002: "0x3600000000000000000000000000000000000000",
 };
 
