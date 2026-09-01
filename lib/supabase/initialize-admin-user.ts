@@ -24,6 +24,9 @@ import { SupabaseClient } from "@supabase/supabase-js";
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SECRET_KEY;
 
+const DOCUMENTED_DEFAULT_EMAIL = "admin@admin.com";
+const BANNED_PASSWORDS = new Set(["123456", "password", "admin"]);
+
 // A server-side-only, admin client for Supabase.
 let adminAuthClient: SupabaseClient | null = null;
 
@@ -40,13 +43,46 @@ if (supabaseUrl && supabaseServiceRoleKey) {
   );
 }
 
+function resolveAdminCredentials():
+  | { email: string; password: string }
+  | { error: string } {
+  const email = process.env.ADMIN_EMAIL?.trim();
+  const password = process.env.ADMIN_PASSWORD?.trim();
+
+  if (!email || !password) {
+    return {
+      error:
+        "ADMIN_EMAIL and ADMIN_PASSWORD must be set to bootstrap the admin account.",
+    };
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    if (
+      email === DOCUMENTED_DEFAULT_EMAIL ||
+      BANNED_PASSWORDS.has(password)
+    ) {
+      return {
+        error:
+          "Refusing to bootstrap admin with documented default credentials in production.",
+      };
+    }
+  }
+
+  return { email, password };
+}
+
 const createAdminUserIfNotExists = async () => {
   if (!adminAuthClient) {
     return;
   }
 
-  const adminEmail = "admin@admin.com";
-  const adminPassword = "123456";
+  const credentials = resolveAdminCredentials();
+  if ("error" in credentials) {
+    console.warn(`Admin user initialization skipped: ${credentials.error}`);
+    return;
+  }
+
+  const { email: adminEmail, password: adminPassword } = credentials;
 
   // We call our custom database function via RPC (Remote Procedure Call).
   // This is a single, fast, and scalable database query.

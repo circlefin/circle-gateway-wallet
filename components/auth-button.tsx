@@ -31,7 +31,7 @@ export async function AuthButton() {
 
   if (user) {
     // Check if the logged-in user is the admin.
-    const isAdmin = user.email === 'admin@admin.com';
+    const isAdmin = user.email === process.env.ADMIN_EMAIL;
 
     // Only fetch credits if the user is NOT the admin.
     let initialCredits = 0;

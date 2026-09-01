@@ -113,7 +113,8 @@ CIRCLE_BLOCKCHAIN=ARC-TESTNET
 CIRCLE_USDC_TOKEN_ID=
 
 # Misc
-ADMIN_EMAIL=admin@admin.com
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=your-strong-password-here
 ```
 
 | Variable                              | Scope       | Purpose                                                                  |
@@ -125,18 +126,18 @@ ADMIN_EMAIL=admin@admin.com
 | `CIRCLE_ENTITY_SECRET`                | Server-side | Circle entity secret for wallet operations.                              |
 | `CIRCLE_BLOCKCHAIN`                   | Server-side | Blockchain network identifier (e.g., "ARC-TESTNET").                     |
 | `CIRCLE_USDC_TOKEN_ID`                | Server-side | USDC token ID for the specified blockchain. Pre-filled for ARC-TESTNET.  |
-| `ADMIN_EMAIL`                         | Server-side | Admin user email address.                                                |
+| `ADMIN_EMAIL`                         | Server-side | Admin user email for first-run bootstrap.                                |
+| `ADMIN_PASSWORD`                      | Server-side | Admin password for first-run bootstrap (required; never use defaults in production). |
 
 ## User Accounts
 
 ### Admin Account
 
-On first startup, an admin user is automatically created with the following credentials:
-
-- **Email:** `admin@admin.com`
-- **Password:** `123456`
+On first startup, an admin user is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env.local`. **Set a strong, unique password before deploying publicly.**
 
 The admin account has access to the **Admin Dashboard**, which provides an overview of all users, wallets, and transactions in the system.
+
+> **Note:** Database triggers that exclude the admin from credits still reference `admin@admin.com`. Use that email locally unless you update the SQL migrations.
 
 Regular users who sign up will see the **User Dashboard**, which allows them to purchase credits with USDC and view their own transaction history.
 
