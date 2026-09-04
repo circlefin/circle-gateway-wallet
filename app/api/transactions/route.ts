@@ -213,11 +213,12 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Fetch user transactions (filter by USER type)
+    // Fetch user transactions (filter by USER type and authenticated user)
     const { data: transactions, error: txError } = await supabase
       .from("transactions")
       .select("*")
       .eq("transaction_type", "USER")
+      .eq("user_id", user.id)
       .order("created_at", { ascending: false });
 
     if (txError) {
