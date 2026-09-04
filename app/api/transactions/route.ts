@@ -17,8 +17,25 @@
  */
 
 import { NextRequest } from "next/server";
+import {
+  createPublicClient,
+  decodeEventLog,
+  erc20Abi,
+  getAddress,
+  http,
+  isAddress,
+  isHash,
+  recoverMessageAddress,
+  type Hash,
+  type Hex,
+} from "viem";
 import { supabaseAdminClient } from "@/lib/supabase/admin-client";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
+import { getUsdcAddress } from "@/lib/wagmi/usdcAddresses";
+import {
+  buildTopupClaimMessage,
+  USDC_MICRO_PER_CREDIT,
+} from "@/lib/credits/topup-claim";
 
 interface TransactionEvent {
   transaction_id: string;
@@ -36,58 +53,184 @@ interface TransactionWebhookEvent {
   [k: string]: unknown;
 }
 
+/** Exchange rate stored on the row; 1 USDC = 1 credit (see USDC_MICRO_PER_CREDIT). */
+const EXCHANGE_RATE_USDC_PER_CREDIT = 1;
+
+const RPC_BY_CHAIN: Record<number, string | undefined> = {
+  1: process.env.RPC_URL_1,
+  137: process.env.RPC_URL_137,
+  8453: process.env.RPC_URL_8453,
+  42161: process.env.RPC_URL_42161,
+  10: process.env.RPC_URL_10,
+  11155111: process.env.RPC_URL_11155111,
+  84532: process.env.RPC_URL_84532,
+  80002: process.env.RPC_URL_80002,
+  421614: process.env.RPC_URL_421614,
+  11155420: process.env.RPC_URL_11155420,
+  // Arc Testnet — primary demo chain in this sample app.
+  5042002: process.env.RPC_URL_5042002 || "https://rpc.testnet.arc.network",
+};
+
+function json(data: unknown, status: number) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function resolveAdminWalletAddress(): Promise<`0x${string}` | null> {
+  const fromEnv = process.env.ADMIN_WALLET_ADDRESS;
+  if (fromEnv && isAddress(fromEnv)) {
+    return getAddress(fromEnv);
+  }
+
+  const { data, error } = await supabaseAdminClient
+    .from("admin_wallets")
+    .select("address")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data?.address || !isAddress(data.address)) {
+    return null;
+  }
+  return getAddress(data.address);
+}
+
 /**
  * POST /api/transactions
- * Records a (credit) top-up transaction after it has been broadcast on-chain.
+ * Records a credit top-up after on-chain USDC settlement.
  *
- * Expected JSON body:
+ * Client-supplied `credits` / `usdcAmount` / `destinationAddress` are ignored.
+ * Amounts come from the Transfer log; the recipient is the server-side admin
+ * wallet; the payer must sign `buildTopupClaimMessage` so another session
+ * cannot claim the payment.
+ *
+ * Body:
  * {
- *   "credits": number,
- *   "usdcAmount": number,          // decimal USDC (e.g. 12.34)
- *   "txHash": string,              // 0x...
+ *   "txHash": "0x...",
  *   "chainId": number,
- *   "walletAddress": string,       // sender wallet 0x...
- *   "destinationAddress": string   // admin wallet recipient 0x... (optional)
+ *   "claimSignature": "0x..."  // personal_sign of buildTopupClaimMessage
  * }
  */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { credits, usdcAmount, txHash, chainId, walletAddress, destinationAddress } = body || {};
+    const { txHash, chainId, claimSignature } = body || {};
 
     if (
-      typeof credits !== "number" ||
-      credits <= 0 ||
-      typeof usdcAmount !== "number" ||
-      usdcAmount <= 0 ||
       typeof txHash !== "string" ||
-      !txHash.startsWith("0x") ||
+      !isHash(txHash) ||
       typeof chainId !== "number" ||
-      typeof walletAddress !== "string" ||
-      !walletAddress.startsWith("0x")
+      typeof claimSignature !== "string" ||
+      !claimSignature.startsWith("0x")
     ) {
-      return new Response(JSON.stringify({ error: "Invalid payload" }), {
-        status: 400,
-      });
+      return json({ error: "Invalid payload" }, 400);
     }
 
-    // Get authenticated user via regular server client (anon key + cookies)
+    const rpcUrl = RPC_BY_CHAIN[chainId];
+    const usdcAddress = getUsdcAddress(chainId);
+    if (!rpcUrl || !usdcAddress) {
+      return json({ error: "Unsupported chain" }, 400);
+    }
+
     const supabase = await createServerSupabase();
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-      });
+      return json({ error: "Unauthorized" }, 401);
     }
 
-    // Build insert row. The RLS policy only allows service_role inserts,
-    // so we use the admin (service role) client here.
-    // Exchange rate: 1 credit = X USDC (currently 0.01)
-    const EXCHANGE_RATE_USDC_PER_CREDIT = 0.01;
-    const idempotencyKey = `${chainId}:${txHash}`;
+    const admin = await resolveAdminWalletAddress();
+    if (!admin) {
+      console.error("[transactions] No admin destination wallet configured");
+      return json({ error: "Configuration error" }, 500);
+    }
+
+    const claimMessage = buildTopupClaimMessage(chainId, txHash);
+    let claimant: `0x${string}`;
+    try {
+      claimant = await recoverMessageAddress({
+        message: claimMessage,
+        signature: claimSignature as Hex,
+      });
+    } catch {
+      return json({ error: "Invalid claim signature" }, 401);
+    }
+
+    const client = createPublicClient({ transport: http(rpcUrl) });
+
+    let receipt;
+    try {
+      receipt = await client.waitForTransactionReceipt({
+        hash: txHash as Hash,
+        timeout: 60_000,
+      });
+    } catch (err) {
+      console.error("[transactions] Receipt wait failed:", err);
+      return json(
+        { error: "Transaction receipt not available yet; retry shortly" },
+        408,
+      );
+    }
+
+    if (receipt.status !== "success") {
+      return json({ error: "Transaction not successful" }, 422);
+    }
+
+    const usdc = getAddress(usdcAddress);
+    const transfer = receipt.logs
+      .filter((log) => {
+        try {
+          return getAddress(log.address) === usdc;
+        } catch {
+          return false;
+        }
+      })
+      .map((log) => {
+        try {
+          return decodeEventLog({
+            abi: erc20Abi,
+            data: log.data,
+            topics: log.topics,
+          });
+        } catch {
+          return null;
+        }
+      })
+      .find((event) => {
+        if (!event || event.eventName !== "Transfer") return false;
+        try {
+          const to = getAddress(event.args.to as string);
+          const from = getAddress(event.args.from as string);
+          return to === admin && from === claimant;
+        } catch {
+          return false;
+        }
+      });
+
+    if (!transfer || transfer.eventName !== "Transfer") {
+      return json(
+        {
+          error:
+            "No matching USDC transfer from the claiming wallet to the app wallet",
+        },
+        422,
+      );
+    }
+
+    const value = transfer.args.value as bigint;
+    if (value < USDC_MICRO_PER_CREDIT) {
+      return json({ error: "Amount below minimum required for credit" }, 422);
+    }
+
+    const credits = Number(value / USDC_MICRO_PER_CREDIT);
+    const verifiedUsdc =
+      Number(value / 1_000_000n) + Number(value % 1_000_000n) / 1_000_000;
+
+    const idempotencyKey = `${chainId}:${txHash.toLowerCase()}`;
 
     const { data: insertedTransaction, error: insertError } =
       await supabaseAdminClient
@@ -95,10 +238,10 @@ export async function POST(req: NextRequest) {
         .insert({
           transaction_type: "USER",
           user_id: user.id,
-          wallet_id: walletAddress,
-          destination_address: destinationAddress || null, // Capture admin wallet destination
+          wallet_id: claimant,
+          destination_address: admin,
           direction: "credit",
-          amount_usdc: usdcAmount, // numeric(18,6)
+          amount_usdc: verifiedUsdc,
           fee_usdc: 0,
           credit_amount: credits,
           exchange_rate: EXCHANGE_RATE_USDC_PER_CREDIT,
@@ -113,19 +256,11 @@ export async function POST(req: NextRequest) {
         .single();
 
     if (insertError) {
-      console.error("[transactions] Insert error:", {
-        message: insertError.message,
-        code: insertError.code,
-        hint: insertError.hint,
-        details: insertError.details,
-      });
-      // Check if this is a duplicate transaction (idempotency)
       if (
         insertError.message.includes("idempotency") ||
         insertError.message.includes("duplicate") ||
         insertError.code === "23505"
       ) {
-        // Try to find the existing transaction
         const { data: existingTx } = await supabaseAdminClient
           .from("transactions")
           .select("*")
@@ -133,8 +268,12 @@ export async function POST(req: NextRequest) {
           .single();
 
         if (existingTx) {
-          return new Response(
-            JSON.stringify({
+          // Only the original claimant's session may read back the row as ok.
+          if (existingTx.user_id !== user.id) {
+            return json({ error: "Transaction already claimed" }, 409);
+          }
+          return json(
+            {
               ok: true,
               transactionId: existingTx.id,
               message: "Transaction already exists",
@@ -148,29 +287,21 @@ export async function POST(req: NextRequest) {
                 createdAt: existingTx.created_at,
                 walletAddress: existingTx.wallet_id,
               },
-            }),
-            { status: 200 }
+            },
+            200,
           );
         }
       }
 
-      const rlsIndicator = /row-level security/i.test(insertError.message)
-        ? "RLS_BLOCK"
-        : undefined;
-
-      return new Response(
-        JSON.stringify({
-          error: "Insert failed",
-          details: insertError.message,
-          code: insertError.code,
-          rls: rlsIndicator,
-        }),
-        { status: 500 }
-      );
+      console.error("[transactions] Insert error:", {
+        message: insertError.message,
+        code: insertError.code,
+      });
+      return json({ error: "Insert failed" }, 500);
     }
 
-    return new Response(
-      JSON.stringify({
+    return json(
+      {
         ok: true,
         transactionId: insertedTransaction.id,
         message: "Transaction recorded successfully",
@@ -184,17 +315,13 @@ export async function POST(req: NextRequest) {
           createdAt: insertedTransaction.created_at,
           walletAddress: insertedTransaction.wallet_id,
         },
-      }),
-      { status: 201 }
+      },
+      201,
     );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    return new Response(
-      JSON.stringify({ error: "Server error", details: message }),
-      {
-        status: 500,
-      }
-    );
+    console.error("[transactions] Server error:", message);
+    return json({ error: "Server error" }, 500);
   }
 }
 
@@ -225,7 +352,7 @@ export async function GET(req: NextRequest) {
         JSON.stringify({ error: "Fetch failed", details: txError.message }),
         {
           status: 500,
-        }
+        },
       );
     }
 
@@ -248,7 +375,7 @@ export async function GET(req: NextRequest) {
           error: "Events fetch failed",
           details: seError.message,
         }),
-        { status: 500 }
+        { status: 500 },
       );
     }
 
@@ -267,7 +394,7 @@ export async function GET(req: NextRequest) {
             error: "Webhook events fetch failed",
             details: weError.message,
           }),
-          { status: 500 }
+          { status: 500 },
         );
       }
       webhookEvents = weData;
@@ -302,7 +429,7 @@ export async function GET(req: NextRequest) {
       JSON.stringify({ error: "Server error", details: message }),
       {
         status: 500,
-      }
+      },
     );
   }
 }

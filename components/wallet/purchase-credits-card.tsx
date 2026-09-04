@@ -19,7 +19,12 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
-import { useAccount, useChainId, useWriteContract } from "wagmi";
+import {
+  useAccount,
+  useChainId,
+  useSignMessage,
+  useWriteContract,
+} from "wagmi";
 import { BaseError, erc20Abi } from "viem";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +42,7 @@ import { toast } from "sonner";
 import Image from "next/image";
 import Link from "next/link";
 import { TransactionConfirmationModal } from "@/components/wallet/transaction-confirmation-modal";
+import { buildTopupClaimMessage } from "@/lib/credits/topup-claim";
 
 const USDC_PER_CREDIT = 1;
 const presetUsdcAmounts = [10, 25, 50, 100];
@@ -51,6 +57,7 @@ export function PurchaseCreditsCard() {
     isLoading: isBalanceLoading,
   } = useUsdcBalance();
   const { writeContractAsync } = useWriteContract();
+  const { signMessageAsync } = useSignMessage();
   const [creditsToPurchase, setCreditsToPurchase] = useState(10);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [currentTransaction, setCurrentTransaction] = useState<{
@@ -157,19 +164,19 @@ export function PurchaseCreditsCard() {
         description: `Hash: ${txHash.slice(0, 10)}...`,
       });
 
-      // Persist (fire-and-forget with basic handling)
+      // Prove control of the paying wallet so another session cannot claim this tx.
+      const claimSignature = await signMessageAsync({
+        message: buildTopupClaimMessage(chainId, txHash),
+      });
+
+      // Server derives credits from the on-chain Transfer; client amounts are ignored.
       const res = await fetch("/api/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          credits: creditsToPurchase,
-          usdcAmount:
-            Number((requiredUsdcMicro / 1_000_000n).toString()) +
-            Number(requiredUsdcMicro % 1_000_000n) / 1_000_000,
           txHash,
           chainId,
-          walletAddress: address,
-          destinationAddress: destination, // Include admin wallet destination
+          claimSignature,
         }),
       });
 
@@ -180,13 +187,22 @@ export function PurchaseCreditsCard() {
         });
       } else {
         const responseData = await res.json();
+        const recorded = responseData.transaction;
+        const recordedCredits =
+          typeof recorded?.credits === "number"
+            ? recorded.credits
+            : creditsToPurchase;
+        const recordedUsdc =
+          typeof recorded?.usdcAmount === "number"
+            ? recorded.usdcAmount
+            : Number((requiredUsdcMicro / 1_000_000n).toString()) +
+              Number(requiredUsdcMicro % 1_000_000n) / 1_000_000;
 
         // Create transaction object for confirmation modal
         const transaction = {
           id: responseData.transactionId || txHash, // Fallback to txHash if no ID returned
-          credits: creditsToPurchase,
-          usdcAmount: Number((requiredUsdcMicro / 1_000_000n).toString()) +
-            Number(requiredUsdcMicro % 1_000_000n) / 1_000_000,
+          credits: recordedCredits,
+          usdcAmount: recordedUsdc,
           txHash,
           chainId,
           status: "pending" as const,
