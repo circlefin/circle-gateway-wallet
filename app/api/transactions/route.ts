@@ -19,8 +19,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdminClient } from "@/lib/supabase/admin-client";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
-// [SECURITY PATCH]: Import viem utilities for on-chain verification
-import { createPublicClient, http, decodeEventLog, erc20Abi, getAddress } from "viem";
+import {
+  createPublicClient,
+  http,
+  decodeEventLog,
+  erc20Abi,
+  getAddress,
+  verifyMessage,
+  type Hex,
+} from "viem";
 
 interface TransactionEvent {
   transaction_id: string;
@@ -38,47 +45,74 @@ interface TransactionWebhookEvent {
   [k: string]: unknown;
 }
 
-// Server-authoritative exchange rate
-const EXCHANGE_RATE_USDC_PER_CREDIT = 0.01;
+// 0.01 USDC per credit = 10,000 micro-USDC (6 decimals) per credit
+const MICRO_USDC_PER_CREDIT = 10_000n;
 
-// Define authorized networks and their USDC contracts
-// Replace these dummy RPC URLs with actual SERVER-ONLY environment variables in production.
+// Supported networks with server-overridable RPC endpoints (including Arc Testnet 5042002)
 const RPC_BY_CHAIN: Record<number, string> = {
   1: process.env.RPC_URL_1 || "https://cloudflare-eth.com",
   137: process.env.RPC_URL_137 || "https://polygon-rpc.com",
   8453: process.env.RPC_URL_8453 || "https://mainnet.base.org",
-  11155111: process.env.RPC_URL_11155111 || "https://rpc.sepolia.org", // Sepolia
-  84532: process.env.RPC_URL_84532 || "https://sepolia.base.org", // Base Sepolia
+  11155111: process.env.RPC_URL_11155111 || "https://rpc.sepolia.org",
+  84532: process.env.RPC_URL_84532 || "https://sepolia.base.org",
+  5042002: process.env.RPC_URL_5042002 || "https://rpc.testnet.arc.network",
 };
 
+// Authorized USDC contract addresses per supported chain
 const USDC_BY_CHAIN: Record<number, `0x${string}`> = {
   1: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
   137: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
   8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Sepolia USDC
-  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia USDC
+  11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  84532: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  5042002: "0x3600000000000000000000000000000000000000",
 };
 
-const json = (data: any, status: number) =>
-  new NextResponse(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
+const json = (data: unknown, status: number) =>
+  new NextResponse(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+/**
+ * Resolves the authorized admin recipient wallet server-side.
+ * Never trusts client input for destination routing.
+ */
+async function resolveAdminWallet(chainId: number): Promise<`0x${string}` | null> {
+  const envAdmin = process.env.ADMIN_WALLET_ADDRESS;
+  if (envAdmin && envAdmin.startsWith("0x")) {
+    return getAddress(envAdmin);
+  }
+
+  const { data: adminRow } = await supabaseAdminClient
+    .from("admin_wallets")
+    .select("wallet_address")
+    .eq("chain_id", chainId)
+    .maybeSingle();
+
+  if (adminRow?.wallet_address && adminRow.wallet_address.startsWith("0x")) {
+    return getAddress(adminRow.wallet_address);
+  }
+
+  return null;
+}
 
 /**
  * POST /api/transactions
- * Records a (credit) top-up transaction after it has been broadcast on-chain.
- * NOTE: Client-provided credit/usdc amounts are ignored. Issuance is derived server-side
- * based on on-chain verification of the txHash.
+ * Records a credit top-up transaction strictly derived from on-chain receipts.
  */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    // NOTE: `credits` and `usdcAmount` are intentionally NOT trusted from the client.
-    const { txHash, chainId, walletAddress, destinationAddress } = body || {};
+    // Note: destinationAddress and credit amounts are intentionally ignored from the payload.
+    const { txHash, chainId, walletAddress, claimSignature } = body || {};
 
     if (
       typeof txHash !== "string" ||
       !txHash.startsWith("0x") ||
       typeof chainId !== "number" ||
       !RPC_BY_CHAIN[chainId] ||
+      !USDC_BY_CHAIN[chainId] ||
       typeof walletAddress !== "string" ||
       !walletAddress.startsWith("0x")
     ) {
@@ -94,30 +128,49 @@ export async function POST(req: NextRequest) {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    // Fallback admin wallet if not provided by client.
-    const EXPECTED_ADMIN_WALLET = process.env.ADMIN_WALLET_ADDRESS;
-    const adminStr = destinationAddress || EXPECTED_ADMIN_WALLET;
-    
-    if (!adminStr || !adminStr.startsWith("0x")) {
-      console.error("[transactions] Missing or invalid admin/destination address.");
+    // 1) Bind claiming user to the paying wallet to prevent front-running / tx hijacking
+    const sender = getAddress(walletAddress);
+    const boundWallet = user.user_metadata?.wallet_address;
+    let isPayerVerified = false;
+
+    if (boundWallet && getAddress(boundWallet) === sender) {
+      isPayerVerified = true;
+    } else if (typeof claimSignature === "string" && claimSignature.startsWith("0x")) {
+      const messageToSign = `Authorize credit claim for transaction ${txHash.toLowerCase()} on chain ${chainId}`;
+      isPayerVerified = await verifyMessage({
+        address: sender,
+        message: messageToSign,
+        signature: claimSignature as Hex,
+      }).catch(() => false);
+    }
+
+    if (!isPayerVerified) {
+      return json(
+        { error: "Payer identity cannot be verified for the authenticated user session" },
+        403
+      );
+    }
+
+    // 2) Resolve the expected admin recipient wallet strictly server-side
+    const expectedAdmin = await resolveAdminWallet(chainId);
+    if (!expectedAdmin) {
+      console.error("[transactions] Missing or invalid server-side admin recipient.");
       return json({ error: "Configuration error" }, 500);
     }
 
-    // [SECURITY PATCH]: 1) Verify the transfer on-chain — do not trust the client's amount.
+    // 3) Verify transaction receipt on-chain
     const client = createPublicClient({ transport: http(RPC_BY_CHAIN[chainId]) });
-    const receipt = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
-    
+    const receipt = await client.getTransactionReceipt({ hash: txHash as Hex });
+
     if (receipt.status !== "success") {
       return json({ error: "Transaction not successful" }, 422);
     }
 
-    const admin = getAddress(adminStr);
-    const usdc = getAddress(USDC_BY_CHAIN[chainId]);
-    const sender = getAddress(walletAddress);
+    const usdcContract = getAddress(USDC_BY_CHAIN[chainId]);
 
-    // Decode logs to find the exact USDC transfer to our admin wallet
+    // Decode logs to locate matching Transfer(from: sender, to: expectedAdmin)
     const transfer = receipt.logs
-      .filter((l) => getAddress(l.address) === usdc)
+      .filter((l) => getAddress(l.address) === usdcContract)
       .map((l) => {
         try {
           return decodeEventLog({ abi: erc20Abi, ...l });
@@ -128,24 +181,33 @@ export async function POST(req: NextRequest) {
       .find(
         (e) =>
           e?.eventName === "Transfer" &&
-          getAddress(e.args.to as string) === admin &&
+          getAddress(e.args.to as string) === expectedAdmin &&
           getAddress(e.args.from as string) === sender
       );
 
     if (!transfer) {
-      return json({ error: "No matching USDC transfer to app wallet found in transaction" }, 422);
+      return json(
+        { error: "No matching USDC transfer to authorized admin wallet found in transaction" },
+        422
+      );
     }
 
-    // [SECURITY PATCH]: 2) Derive amounts server-side from the on-chain value (USDC has 6 decimals).
-    const verifiedUsdc = Number(transfer.args.value as bigint) / 1_000_000;
-    const credits = Math.floor(verifiedUsdc / EXCHANGE_RATE_USDC_PER_CREDIT);
-    
-    if (credits <= 0) {
+    // 4) Derive credits using exact BigInt integer math
+    const microUsdcValue = transfer.args.value as bigint;
+    const creditsBigInt = microUsdcValue / MICRO_USDC_PER_CREDIT;
+
+    if (creditsBigInt <= 0n) {
       return json({ error: "Amount below minimum required for credit" }, 422);
     }
 
-    // [SECURITY PATCH]: 3) Insert (idempotent on chain:txHash) with SERVER-COMPUTED credit_amount.
-    const idempotencyKey = `${chainId}:${txHash}`;
+    const credits = Number(creditsBigInt);
+    // Integer-division formatting for decimal DB presentation: whole and fraction parts
+    const wholeUsdc = microUsdcValue / 1_000_000n;
+    const fractionalPart = (microUsdcValue % 1_000_000n).toString().padStart(6, "0");
+    const verifiedUsdcDecimal = Number(`${wholeUsdc}.${fractionalPart}`);
+
+    // 5) Insert idempotent transaction record
+    const idempotencyKey = `${chainId}:${txHash.toLowerCase()}`;
 
     const { data: insertedTransaction, error: insertError } =
       await supabaseAdminClient
@@ -153,13 +215,13 @@ export async function POST(req: NextRequest) {
         .insert({
           transaction_type: "USER",
           user_id: user.id,
-          wallet_id: walletAddress,
-          destination_address: admin,
+          wallet_id: sender,
+          destination_address: expectedAdmin,
           direction: "credit",
-          amount_usdc: verifiedUsdc, // server-derived
+          amount_usdc: verifiedUsdcDecimal,
           fee_usdc: 0,
-          credit_amount: credits, // server-derived
-          exchange_rate: EXCHANGE_RATE_USDC_PER_CREDIT,
+          credit_amount: credits,
+          exchange_rate: 0.01,
           chain: String(chainId),
           asset: "USDC",
           tx_hash: txHash,
@@ -171,13 +233,11 @@ export async function POST(req: NextRequest) {
         .single();
 
     if (insertError) {
-      // Check if this is a duplicate transaction (idempotency)
       if (
         insertError.message.includes("idempotency") ||
         insertError.message.includes("duplicate") ||
         insertError.code === "23505"
       ) {
-        // Try to find the existing transaction
         const { data: existingTx } = await supabaseAdminClient
           .from("transactions")
           .select("*")
@@ -206,20 +266,19 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // [SECURITY PATCH]: Prevent Sensitive error disclosure. Log details server-side only.
       console.error("[transactions] Insert error:", {
         message: insertError.message,
         code: insertError.code,
       });
 
-      return json({ error: "Insert failed" }, 500); // Opaque to client
+      return json({ error: "Insert failed" }, 500);
     }
 
     return json(
       {
         ok: true,
         transactionId: insertedTransaction.id,
-        credits: credits,
+        credits,
         message: "Transaction recorded successfully",
         transaction: {
           id: insertedTransaction.id,
@@ -237,7 +296,6 @@ export async function POST(req: NextRequest) {
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     console.error("[transactions] Server error:", message);
-    // Hide details from client
     return json({ error: "Server error" }, 500);
   }
 }
@@ -254,7 +312,6 @@ export async function GET(req: NextRequest) {
       return json({ error: "Unauthorized" }, 401);
     }
 
-    // Fetch user transactions (filter by USER type)
     const { data: transactions, error: txError } = await supabase
       .from("transactions")
       .select("*")
@@ -272,7 +329,6 @@ export async function GET(req: NextRequest) {
 
     const ids = transactions.map((t) => t.id);
 
-    // Status change events
     const { data: statusEvents, error: seError } = await supabase
       .from("transaction_events")
       .select("*")
@@ -284,7 +340,6 @@ export async function GET(req: NextRequest) {
       return json({ error: "Events fetch failed" }, 500);
     }
 
-    // Optional raw webhook events
     let webhookEvents: TransactionWebhookEvent[] | null = null;
     if (includeWebhook) {
       const { data: weData, error: weError } = await supabase
@@ -300,7 +355,6 @@ export async function GET(req: NextRequest) {
       webhookEvents = weData;
     }
 
-    // Aggregate events by transaction_id
     const statusByTx = new Map<string, TransactionEvent[]>();
     (statusEvents || []).forEach((e) => {
       const arr = statusByTx.get(e.transaction_id) || [];
